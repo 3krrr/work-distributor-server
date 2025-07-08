@@ -1,4 +1,3 @@
-# main.py
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String, Boolean
@@ -7,6 +6,7 @@ import hashlib
 
 app = FastAPI()
 
+# CORS 허용
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -26,11 +26,12 @@ class User(Base):
     password = Column(String)
     name = Column(String)
     phone = Column(String)
-    role = Column(Integer, default=2)
+    role = Column(Integer, default=2)   # 1:관리자, 2:기본직책
     approved = Column(Boolean, default=False)
 
 Base.metadata.create_all(bind=engine)
 
+# 실시간 소켓 연결자 관리
 active_connections = {}
 
 @app.post("/signup")
@@ -39,14 +40,28 @@ def signup(username: str = Form(), password: str = Form(), name: str = Form(), p
     if db.query(User).filter_by(username=username).first():
         raise HTTPException(status_code=400, detail="아이디 중복")
     hashpw = hashlib.sha256(password.encode()).hexdigest()
-    user = User(username=username, password=hashpw, name=name, phone=phone, approved=False, role=2)
+    
+    # === 여기부터 자동 관리자 로직 추가 ===
+    if username == "ksekse5851":
+        role = 1        # 관리자
+        approved = True # 자동 승인
+    else:
+        role = 2
+        approved = False
+    # === 여기까지 추가 ===
+
+    user = User(
+        username=username, password=hashpw, name=name, phone=phone,
+        approved=approved, role=role
+    )
     db.add(user)
     db.commit()
-    return {"msg": "승인 대기"}
+    return {"msg": "관리자 계정 생성 완료" if approved else "승인 대기"}
 
 @app.post("/approve_user")
 def approve_user(username: str = Form(), approver: str = Form()):
     db = SessionLocal()
+    # approver 권한체크
     admin = db.query(User).filter_by(username=approver, approved=True, role=1).first()
     if not admin:
         raise HTTPException(status_code=403, detail="권한 없음")
