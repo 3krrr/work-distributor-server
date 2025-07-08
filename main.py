@@ -1,8 +1,13 @@
-from fastapi import FastAPI, Form, HTTPException
+import os
+from fastapi import FastAPI, Form, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 import sqlite3
+import uuid
 
 DB_FILE = "worknet.db"
+UPLOAD_FOLDER = "uploads"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 def db():
     conn = sqlite3.connect(DB_FILE)
@@ -38,9 +43,19 @@ def init_db():
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             from_user TEXT,
-            to_users TEXT, -- 콤마로 구분된 유저명
+            to_users TEXT,
             title TEXT,
-            content TEXT
+            content TEXT,
+            attachment TEXT,
+            status TEXT DEFAULT '확인대기' -- 확인대기, 확인, 해결, 거절
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS msg_status (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id INTEGER,
+            username TEXT,
+            status TEXT DEFAULT '확인대기'
         )
     ''')
     c.execute('''
@@ -53,13 +68,13 @@ def init_db():
         )
     ''')
 
-    # 최초 관리자/직책 자동생성
     c.execute("SELECT COUNT(*) FROM roles")
     if c.fetchone()[0] == 0:
-        c.execute('''INSERT INTO roles (name, can_approve, can_edit_role_name, can_edit_user_role, can_edit_role_permissions, can_send_message)
-                  VALUES ('관리자', 1, 1, 1, 1, 1)''')
-        c.execute('''INSERT INTO roles (name, can_approve, can_edit_user_role, can_send_message)
-                  VALUES ('일반', 0, 0, 1)''')
+        for i in range(15):
+            c.execute('''INSERT INTO roles (name, can_approve, can_edit_role_name, can_edit_user_role, can_edit_role_permissions, can_send_message)
+                      VALUES (?, 1, 1, 1, 1, 1)''', (f'직책{i+1}',))
+        c.execute('''UPDATE roles SET name='관리자', can_approve=1, can_edit_role_name=1, can_edit_user_role=1, can_edit_role_permissions=1, can_send_message=1 WHERE id=1''')
+        c.execute('''UPDATE roles SET name='일반', can_approve=0, can_edit_role_name=0, can_edit_user_role=0, can_edit_role_permissions=0, can_send_message=1 WHERE id=2''')
         conn.commit()
     conn.close()
 
@@ -68,29 +83,17 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 init_db()
 
 @app.post("/signup")
-def signup(
-    username: str = Form(...),
-    password: str = Form(...),
-    name: str = Form(...),
-    phone: str = Form(...)
-):
+def signup(username: str = Form(...), password: str = Form(...), name: str = Form(...), phone: str = Form(...)):
     conn = db()
     c = conn.cursor()
     c.execute("SELECT * FROM users WHERE username = ?", (username,))
     if c.fetchone():
         conn.close()
         raise HTTPException(status_code=400, detail="이미 존재하는 아이디입니다.")
-    # 첫 유저는 무조건 관리자, 아니면 일반
     c.execute("SELECT COUNT(*) FROM users")
     first = c.fetchone()[0] == 0
-    if first:
-        c.execute("SELECT id FROM roles WHERE name='관리자'")
-        role_id = c.fetchone()[0]
-        approved = 1
-    else:
-        c.execute("SELECT id FROM roles WHERE name='일반'")
-        role_id = c.fetchone()[0]
-        approved = 0
+    role_id = 1 if first else 2
+    approved = 1 if first else 0
     c.execute("INSERT INTO users (username, password, name, phone, role_id, approved) VALUES (?, ?, ?, ?, ?, ?)",
               (username, password, name, phone, role_id, approved))
     conn.commit()
@@ -195,16 +198,30 @@ def edit_user_role(username: str = Form(...), new_role_id: int = Form(...)):
     return {"status": "ok"}
 
 @app.post("/send_message")
-def send_message(
+async def send_message(
     from_user: str = Form(...), 
     to_users: str = Form(...),
     title: str = Form(...),
-    content: str = Form(...)
+    content: str = Form(...),
+    file: UploadFile = File(None)
 ):
+    attachment = ""
+    if file:
+        ext = os.path.splitext(file.filename)[1]
+        filename = f"{uuid.uuid4().hex}{ext}"
+        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        with open(filepath, "wb") as f:
+            f.write(await file.read())
+        attachment = filename
+
     conn = db()
     c = conn.cursor()
-    c.execute("INSERT INTO messages (from_user, to_users, title, content) VALUES (?, ?, ?, ?)",
-              (from_user, to_users, title, content))
+    c.execute("INSERT INTO messages (from_user, to_users, title, content, attachment) VALUES (?, ?, ?, ?, ?)",
+              (from_user, to_users, title, content, attachment))
+    msg_id = c.lastrowid
+    # 상태 테이블 개별 생성
+    for user in to_users.split(","):
+        c.execute("INSERT INTO msg_status (message_id, username, status) VALUES (?, ?, ?)", (msg_id, user, '확인대기'))
     conn.commit()
     conn.close()
     return {"status": "ok"}
@@ -213,8 +230,13 @@ def send_message(
 def received_messages(username: str):
     conn = db()
     c = conn.cursor()
-    c.execute("""SELECT * FROM messages WHERE ','||to_users||',' LIKE ?""", (f'%,{username},%',))
+    c.execute("SELECT * FROM messages WHERE ','||to_users||',' LIKE ?", (f'%,{username},%',))
     rows = [dict(row) for row in c.fetchall()]
+    for row in rows:
+        # 개별 상태
+        c.execute("SELECT status FROM msg_status WHERE message_id=? AND username=?", (row["id"], username))
+        s = c.fetchone()
+        row["my_status"] = s["status"] if s else "확인대기"
     conn.close()
     return {"messages": rows}
 
@@ -222,10 +244,27 @@ def received_messages(username: str):
 def sent_messages(username: str):
     conn = db()
     c = conn.cursor()
-    c.execute("""SELECT * FROM messages WHERE from_user=?""", (username,))
+    c.execute("SELECT * FROM messages WHERE from_user=?", (username,))
     rows = [dict(row) for row in c.fetchall()]
+    # 각 수신자별 상태 포함
+    for row in rows:
+        to_users = row["to_users"].split(",")
+        row["statuses"] = []
+        for u in to_users:
+            c.execute("SELECT status FROM msg_status WHERE message_id=? AND username=?", (row["id"], u))
+            s = c.fetchone()
+            row["statuses"].append({"user": u, "status": s["status"] if s else "확인대기"})
     conn.close()
     return {"messages": rows}
+
+@app.post("/update_msg_status")
+def update_msg_status(message_id: int = Form(...), username: str = Form(...), status: str = Form(...)):
+    conn = db()
+    c = conn.cursor()
+    c.execute("UPDATE msg_status SET status=? WHERE message_id=? AND username=?", (status, message_id, username))
+    conn.commit()
+    conn.close()
+    return {"status": "ok"}
 
 @app.get("/comments")
 def get_comments(message_id: int):
@@ -244,3 +283,10 @@ def add_comment(message_id: int = Form(...), username: str = Form(...), comment:
     conn.commit()
     conn.close()
     return {"status": "ok"}
+
+@app.get("/download_file/{filename}")
+def download_file(filename: str):
+    path = os.path.join(UPLOAD_FOLDER, filename)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="파일 없음")
+    return FileResponse(path, filename=filename)
