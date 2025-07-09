@@ -312,7 +312,7 @@ def change_password(username: str = Form(...), old_password: str = Form(...), ne
 def msg_responses(message_id: int):
     conn = db()
     c = conn.cursor()
-    c.execute("SELECT username, status FROM msg_status WHERE message_id=?", (message_id,))
-    resps = [dict(row) for row in c.fetchall()]
+    c.execute("SELECT username, status FROM msg_status WHERE message_id = ?", (message_id,))
+    rows = [{"username": row["username"], "status": row["status"]} for row in c.fetchall()]
     conn.close()
-    return {"responses": resps}
+    return {"responses": rows}
