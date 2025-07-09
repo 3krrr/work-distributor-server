@@ -307,3 +307,12 @@ def change_password(username: str = Form(...), old_password: str = Form(...), ne
     conn.commit()
     conn.close()
     return {"result": "ok"}
+
+@app.get("/msg_responses")
+def msg_responses(message_id: int):
+    conn = db()
+    c = conn.cursor()
+    c.execute("SELECT username, status FROM msg_status WHERE message_id=?", (message_id,))
+    resps = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return {"responses": resps}
