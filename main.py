@@ -312,7 +312,22 @@ def change_password(username: str = Form(...), old_password: str = Form(...), ne
 def msg_responses(message_id: int):
     conn = db()
     c = conn.cursor()
-    c.execute("SELECT username, status FROM msg_status WHERE message_id = ?", (message_id,))
-    rows = [{"username": row["username"], "status": row["status"]} for row in c.fetchall()]
+    # username, status, name, role_name까지 한번에 JOIN
+    c.execute("""
+        SELECT s.username, s.status, u.name, r.name as role_name
+        FROM msg_status s
+        JOIN users u ON s.username = u.username
+        JOIN roles r ON u.role_id = r.id
+        WHERE s.message_id = ?
+    """, (message_id,))
+    rows = [
+        {
+            "username": row["username"],
+            "status": row["status"],
+            "name": row["name"],
+            "role_name": row["role_name"]
+        }
+        for row in c.fetchall()
+    ]
     conn.close()
     return {"responses": rows}
