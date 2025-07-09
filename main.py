@@ -290,3 +290,20 @@ def download_file(filename: str):
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="파일 없음")
     return FileResponse(path, filename=filename)
+
+@app.post("/change_password")
+def change_password(username: str = Form(...), old_password: str = Form(...), new_password: str = Form(...)):
+    conn = db()
+    c = conn.cursor()
+    c.execute("SELECT password FROM users WHERE username=?", (username,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="존재하지 않는 사용자입니다.")
+    if row["password"] != old_password:
+        conn.close()
+        raise HTTPException(status_code=400, detail="기존 비밀번호가 일치하지 않습니다.")
+    c.execute("UPDATE users SET password=? WHERE username=?", (new_password, username))
+    conn.commit()
+    conn.close()
+    return {"result": "ok"}
