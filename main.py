@@ -143,7 +143,6 @@ def members():
     conn.close()
     return {"members": users}
 
-
 @app.get("/roles")
 def get_roles():
     conn = db()
@@ -154,7 +153,7 @@ def get_roles():
     if not any(r["id"] == 9999 for r in roles):
         roles.append({
             "id": 9999,
-            "name": "슈퍼관리자",
+            "name": "관리자",
             "can_approve": 1,
             "can_edit_user_role": 1,
             "can_edit_role_permissions": 1,
@@ -163,6 +162,41 @@ def get_roles():
         })
     conn.close()
     return {"roles": roles}
+
+# --- 직책 추가 ---
+@app.post("/add_role")
+def add_role(
+    name: str = Form(...),
+    can_approve: int = Form(0),
+    can_edit_role_name: int = Form(0),
+    can_edit_user_role: int = Form(0),
+    can_edit_role_permissions: int = Form(0),
+    can_send_message: int = Form(1)
+):
+    conn = db()
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO roles (name, can_approve, can_edit_role_name, can_edit_user_role, can_edit_role_permissions, can_send_message) VALUES (?, ?, ?, ?, ?, ?)",
+        (name, can_approve, can_edit_role_name, can_edit_user_role, can_edit_role_permissions, can_send_message)
+    )
+    conn.commit()
+    conn.close()
+    return {"status": "ok"}
+
+# --- 직책 삭제 ---
+@app.post("/delete_role")
+def delete_role(role_id: int = Form(...)):
+    conn = db()
+    c = conn.cursor()
+    # 그 role_id를 사용중인 유저가 있으면 삭제 불가
+    c.execute("SELECT COUNT(*) FROM users WHERE role_id=?", (role_id,))
+    if c.fetchone()[0] > 0:
+        conn.close()
+        raise HTTPException(400, "해당 직책을 사용하는 사용자가 있습니다.")
+    c.execute("DELETE FROM roles WHERE id=?", (role_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "ok"}
 
 @app.post("/edit_user_role")
 def edit_user_role(username: str = Form(...), new_role_id: int = Form(...)):
