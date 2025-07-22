@@ -1,7 +1,8 @@
 import os
 import uuid
 import sqlite3
-from fastapi import FastAPI, Form, UploadFile, File, HTTPException
+import datetime
+from fastapi import FastAPI, Form, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
@@ -17,7 +18,7 @@ def db():
 def init_db():
     conn = db()
     c = conn.cursor()
-    # 사용자 테이블
+    # users 테이블에 last_activity 필드 추가
     c.execute('''
         CREATE TABLE IF NOT EXISTS users (
             username TEXT PRIMARY KEY,
@@ -25,10 +26,11 @@ def init_db():
             name TEXT,
             phone TEXT,
             role_id INTEGER DEFAULT 1,
-            approved INTEGER DEFAULT 1
+            approved INTEGER DEFAULT 1,
+            last_activity TIMESTAMP
         )
     ''')
-    # 직책 테이블
+    # roles
     c.execute('''
         CREATE TABLE IF NOT EXISTS roles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,7 +42,7 @@ def init_db():
             can_send_message INTEGER DEFAULT 1
         )
     ''')
-    # 메시지 테이블
+    # messages
     c.execute('''
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,7 +54,7 @@ def init_db():
             created TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    # 메시지 상태 (수신자별)
+    # msg_status
     c.execute('''
         CREATE TABLE IF NOT EXISTS msg_status (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,7 +63,7 @@ def init_db():
             status TEXT DEFAULT '확인대기'
         )
     ''')
-    # 댓글
+    # comments
     c.execute('''
         CREATE TABLE IF NOT EXISTS comments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -71,8 +73,8 @@ def init_db():
             created TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    conn.commit()
     # 기본 직책 삽입(없으면)
+    conn.commit()
     c.execute("SELECT COUNT(*) FROM roles")
     if c.fetchone()[0] == 0:
         c.execute("INSERT INTO roles (name, can_approve, can_send_message) VALUES ('관리자',1,1)")
@@ -84,8 +86,42 @@ app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 init_db()
 
-### 1. 회원가입/로그인/멤버/직책
+# ---------- 실시간 접속자 알림 웹소켓 -----------
+connected_websockets = set()
+user_last_activity = {}  # {username: datetime}
 
+@app.websocket("/ws/{username}")
+async def websocket_endpoint(websocket: WebSocket, username: str):
+    await websocket.accept()
+    connected_websockets.add(websocket)
+
+    now = datetime.datetime.now()
+    last = user_last_activity.get(username)
+    user_last_activity[username] = now
+    # DB 기록도 갱신
+    with db() as conn:
+        conn.execute("UPDATE users SET last_activity=? WHERE username=?", (now, username))
+        conn.commit()
+    # 5분동안 activity 없던 유저면 "최초접속"으로 판단
+    is_new_login = (last is None) or ((now - last).total_seconds() > 300)
+    if is_new_login:
+        for ws in list(connected_websockets):
+            try:
+                if ws != websocket:
+                    await ws.send_json({"type": "user_joined", "username": username})
+            except Exception:
+                pass
+    try:
+        while True:
+            data = await websocket.receive_text()
+            user_last_activity[username] = datetime.datetime.now()
+            with db() as conn:
+                conn.execute("UPDATE users SET last_activity=? WHERE username=?", (datetime.datetime.now(), username))
+                conn.commit()
+    except WebSocketDisconnect:
+        connected_websockets.remove(websocket)
+
+# ---------- 1. 회원가입/로그인/멤버/직책 ----------
 @app.post("/signup")
 def signup(
     username: str = Form(...),
@@ -99,17 +135,16 @@ def signup(
     if c.fetchone():
         conn.close()
         raise HTTPException(409, "이미 가입된 아이디입니다.")
-    
-    # [중요] ksekse5851은 관리자(role_id=1), 승인(approved=1)
+    now = datetime.datetime.now()
     if username == "ksekse5851":
         c.execute(
-            "INSERT INTO users (username, password, name, phone, role_id, approved) VALUES (?, ?, ?, ?, ?, ?)",
-            (username, password, name, phone, 1, 1)
+            "INSERT INTO users (username, password, name, phone, role_id, approved, last_activity) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (username, password, name, phone, 1, 1, now)
         )
     else:
         c.execute(
-            "INSERT INTO users (username, password, name, phone, role_id, approved) VALUES (?, ?, ?, ?, ?, ?)",
-            (username, password, name, phone, 2, 0)
+            "INSERT INTO users (username, password, name, phone, role_id, approved, last_activity) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (username, password, name, phone, 2, 0, now)
         )
     conn.commit()
     conn.close()
@@ -128,9 +163,12 @@ def login(username: str = Form(...), password: str = Form(...)):
         conn.close()
         raise HTTPException(403, "승인 대기중입니다.")
     user = dict(row)
-    # 오로지 ksekse5851만 role_id=9999(슈퍼권한)으로 덮어씌움
     if username == "ksekse5851":
         user["role_id"] = 9999
+    # 로그인 시점 last_activity 갱신
+    now = datetime.datetime.now()
+    c.execute("UPDATE users SET last_activity=? WHERE username=?", (now, username))
+    conn.commit()
     conn.close()
     return user
 
@@ -149,7 +187,6 @@ def get_roles():
     c = conn.cursor()
     c.execute("SELECT * FROM roles")
     roles = [dict(row) for row in c.fetchall()]
-    # 9999 슈퍼권한 추가(중복방지)
     if not any(r["id"] == 9999 for r in roles):
         roles.append({
             "id": 9999,
@@ -163,7 +200,6 @@ def get_roles():
     conn.close()
     return {"roles": roles}
 
-# --- 직책 추가 ---
 @app.post("/add_role")
 def add_role(
     name: str = Form(...),
@@ -183,12 +219,10 @@ def add_role(
     conn.close()
     return {"status": "ok"}
 
-# --- 직책 삭제 ---
 @app.post("/delete_role")
 def delete_role(role_id: int = Form(...)):
     conn = db()
     c = conn.cursor()
-    # 그 role_id를 사용중인 유저가 있으면 삭제 불가
     c.execute("SELECT COUNT(*) FROM users WHERE role_id=?", (role_id,))
     if c.fetchone()[0] > 0:
         conn.close()
@@ -235,8 +269,7 @@ def edit_role_permissions(
     conn.close()
     return {"status": "ok"}
 
-### 2. 승인/차단/삭제
-
+# ---------- 2. 승인/차단/삭제 ----------
 @app.get("/pending_users")
 def pending_users():
     conn = db()
@@ -264,8 +297,7 @@ def remove_user(username: str = Form(...)):
     conn.close()
     return {"status": "ok"}
 
-### 3. 메시지
-
+# ---------- 3. 메시지 ----------
 @app.post("/send_message")
 async def send_message(
     from_user: str = Form(...),
@@ -326,7 +358,6 @@ def msg_responses(message_id: int):
     c = conn.cursor()
     c.execute("SELECT username, status FROM msg_status WHERE message_id=?", (message_id,))
     resp = [dict(row) for row in c.fetchall()]
-    # 사용자 이름/직책 정보 추가
     c2 = conn.cursor()
     for r in resp:
         c2.execute("SELECT name, role_id FROM users WHERE username=?", (r["username"],))
@@ -349,8 +380,7 @@ def update_msg_status(message_id: int = Form(...), username: str = Form(...), st
     conn.close()
     return {"status": "ok"}
 
-### 4. 댓글/첨부
-
+# ---------- 4. 댓글/첨부 ----------
 @app.get("/comments")
 def get_comments(message_id: int):
     conn = db()
@@ -376,8 +406,7 @@ def download_file(filename: str):
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(path, filename=filename)
 
-### 5. 비밀번호 변경
-
+# ---------- 5. 비밀번호 변경 ----------
 @app.post("/change_password")
 def change_password(username: str = Form(...), old_password: str = Form(...), new_password: str = Form(...)):
     conn = db()
