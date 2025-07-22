@@ -89,37 +89,27 @@ init_db()
 # ---------- 실시간 접속자 알림 웹소켓 -----------
 connected_websockets = set()
 user_last_activity = {}  # {username: datetime}
+active_connections = {}
 
 @app.websocket("/ws/{username}")
 async def websocket_endpoint(websocket: WebSocket, username: str):
     await websocket.accept()
-    connected_websockets.add(websocket)
-
-    now = datetime.datetime.now()
-    last = user_last_activity.get(username)
-    user_last_activity[username] = now
-    # DB 기록도 갱신
-    with db() as conn:
-        conn.execute("UPDATE users SET last_activity=? WHERE username=?", (now, username))
-        conn.commit()
-    # 5분동안 activity 없던 유저면 "최초접속"으로 판단
-    is_new_login = (last is None) or ((now - last).total_seconds() > 300)
-    if is_new_login:
-        for ws in list(connected_websockets):
+    active_connections[username] = websocket
+    # 5분간 송수신 없던 유저만 "접속"으로 판단
+    # 여기선 단순히 "누가 접속했다" 전체 브로드캐스트
+    for user, conn in active_connections.items():
+        if user != username:
             try:
-                if ws != websocket:
-                    await ws.send_json({"type": "user_joined", "username": username})
-            except Exception:
+                await conn.send_json({"type": "user_connected", "username": username})
+            except:
                 pass
     try:
         while True:
+            # 클라이언트가 주기적으로 ping 메시지(keepalive) 보내면 여기서 받음
             data = await websocket.receive_text()
-            user_last_activity[username] = datetime.datetime.now()
-            with db() as conn:
-                conn.execute("UPDATE users SET last_activity=? WHERE username=?", (datetime.datetime.now(), username))
-                conn.commit()
+            # 필요시 여기서 데이터 로직 추가
     except WebSocketDisconnect:
-        connected_websockets.remove(websocket)
+        del active_connections[username]
 
 # ---------- 1. 회원가입/로그인/멤버/직책 ----------
 @app.post("/signup")
